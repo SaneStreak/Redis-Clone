@@ -8,7 +8,7 @@
 #include <cstring>
 #include <cassert>
 
-const size_t k_max_msg = 4096;
+const size_t k_max_msg = 32 << 20;
 
 //per connection state
 struct Conn {
@@ -124,6 +124,8 @@ static void handle_read(Conn *conn){
     if(conn->outgoing.size() > 0){
         conn->want_read = false;
         conn->want_write = true;
+
+        return handle_write(conn);
     }
 }
 
