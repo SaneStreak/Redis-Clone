@@ -5,6 +5,12 @@
 #include <unistd.h>
 #include <cstring>
 
+enum {
+    RES_OK = 0, //success
+    RES_ERR = 1, //unrecognizeed or malformed content
+    RES_NX = 2, //key not found 
+};
+
 static void die(const char *msg){
     perror(msg);
     exit(EXIT_FAILURE);

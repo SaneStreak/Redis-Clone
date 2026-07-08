@@ -7,8 +7,16 @@
 #include <fcntl.h>
 #include <cstring>
 #include <cassert>
+#include <map>
 
 const size_t k_max_msg = 32 << 20;
+const size_t k_max_args = 200 * 1000; //safety limit matching the target architecture
+
+enum {
+    RES_OK = 0, //success
+    RES_ERR = 1, //unrecognizeed or malformed content
+    RES_NX = 2, //key not found 
+};
 
 //per connection state
 struct Conn {
@@ -19,6 +27,8 @@ struct Conn {
     std::vector<uint8_t> incoming;
     std::vector<uint8_t> outgoing;
 };
+
+static void handle_write(Conn *conn);
 
 static void die(const char *msg){
     perror(msg);
@@ -66,6 +76,115 @@ static Conn *handle_accept(int fd){
     return conn;
 }
 
+//to read the 4 byte integer
+static bool read_u32(const uint8_t *&cur, const uint8_t *end, uint32_t &out){
+    if(cur + 4 > end){
+        return false;
+    }
+
+    memcpy(&out, cur, 4);
+    cur += 4;
+    return true;
+}
+
+//to read the actual string
+static bool read_str(const uint8_t *&cur, const uint8_t *end, size_t n, std::string &out){
+    if(cur + n > end){
+        return false;
+    }
+    out.assign((const char *)cur, n);
+    cur += n;
+    return true;
+}
+
+struct Response {
+    uint32_t status = 0;
+    //old
+    //std::vector<uint8_t> data;
+
+    //new
+    const std::string *data_ptr = nullptr; //pointer to the raw string inside g_data
+};
+
+//
+static int32_t parse_req(const uint8_t *data, size_t size, std::vector<std::string> &out){
+    const uint8_t *end = data + size;
+    uint32_t nstr = 0;
+
+    //extract the multi string argument count header (nstr)
+    if(!read_u32(data, end, nstr)){
+        return -1;
+    }
+
+    //safety cap validation
+    if(nstr > k_max_args){
+        return -1;
+    }
+
+    //loop until all designated length prefixed strings are parsed
+    while(out.size() < nstr){
+        uint32_t len = 0;
+        if(!read_u32(data, end, len)){
+            return -1;
+        }
+        out.push_back(std::string());
+        if(!read_str(data, end, len, out.back())){
+            return -1;
+        }
+    }
+
+    //assert no trailing garbage data exists outside the packet declaration frame
+    if(data != end){
+        return -1;
+    }
+
+    return 0;
+}
+
+//global placeholder storage mag; later drop it for my own hashtable in later chapter
+static std::map<std::string, std::string> g_data;
+
+static void do_request(std::vector<std::string> &cmd, Response &out){
+    if(cmd.size() == 2 && cmd[0] == "get"){
+        auto it = g_data.find(cmd[1]);
+        if(it == g_data.end()){
+            out.status = RES_NX; //key doesn't exist
+            return;
+        }   
+        //const std::string &val = it->second;
+        // out.data.assign(val.begin(), val.end()); //copy raw string value bytes into byte array
+
+        //updated
+        out.data_ptr = &it->second;
+        out.status = RES_OK; //zero copy: assign the address of the string inside the map directly
+    }else if(cmd.size() == 3 && cmd[0] == "set"){
+        g_data[cmd[1]].swap(cmd[2]); //zero copy swap efficiency to transfer string data ownership
+        out.status = RES_OK;
+    }else if(cmd.size() == 2 && cmd[0] == "del"){
+        g_data.erase(cmd[1]);
+        out.status = RES_OK;
+    }else{
+        out.status = RES_ERR; //unrecognized command structure
+    }
+
+}
+
+static void make_response(const Response &resp, std::vector<uint8_t> &out){
+    uint32_t data_size = resp.data_ptr ? (uint32_t)resp.data_ptr.size() : 0;
+    uint32_t resp_len = 4 + data_size; //4 bytes for status code + data payload bytes
+
+    //1. serialize the outer packet messagelength header
+    buf_append(out, (const uint8_t *)&resp_len, 4);
+
+    //2. serialize the application response status code
+    buf_append(out, (const uint8_t *)&resp.status, 4);
+
+    //3. zero copy leap: push the data directly from the storage map memore pool
+    if(data_size > 0){
+        buf_append(out, (const uint8_t *)resp.data_ptr->data(), data_size);
+    }
+}
+
 //helper to inspect the buffer and processe exactly one complete packet if ready
 
 static bool try_one_request(Conn *conn){
@@ -83,20 +202,37 @@ static bool try_one_request(Conn *conn){
     }
 
     //check if the entire payload?? body has arrived in our stream buffer
-     if(4 + len > conn->incoming.size()){
+    if(4 + len > conn->incoming.size()){
+       return false;
+    }
+
+    //extract message body reference
+    const uint8_t *request = &conn->incoming[4];
+
+    //application logic workroom
+    // buf_append(conn->outgoing, (const uint8_t *)&len, 4);
+    // buf_append(conn->outgoing, request, len);
+
+    //updated:
+    //1. parse the raw request payload into a clean string vector
+    std::vector<std::string> cmd;
+    if(parse_req(request, len, cmd) < 0){
+        std::cerr << "[Server] Protocol error: bad request layout" << std::endl;
+        conn->want_close = true;
         return false;
-     }
+    }
 
-     //extract message body reference
-     const uint8_t *request = &conn->incoming[4];
+    //2. Process the command using the global map reouting matrix
+    Response resp;
+    do_request(cmd, resp);
 
-     //application logic workroom
-     buf_append(conn->outgoing, (const uint8_t *)&len, 4);
-     buf_append(conn->outgoing, request, len);
+    //3. serialize the response directly onto the outbound network stream
+    make_response(resp, conn->outgoing);
 
-     //slice the processed packet cleanly off our dynamic vector stream
-     buf_consume(conn->incoming, 4 + len);
-     return true;
+    //end of application logic
+    //slice the processed packet cleanly off our dynamic vector stream
+    buf_consume(conn->incoming, 4 + len);
+    return true;
 }
 
 //4 gulp data into incoming stream buffer
