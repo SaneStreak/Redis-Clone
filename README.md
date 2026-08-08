@@ -20,7 +20,7 @@ A single-threaded, high-performance, in-memory key-value database built in C++17
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │ 1. Async Network Reactor (server.cpp)                                  │
-│    - Non-blocking Sockets (O_NONBLOCK) multiplexed via poll()           │
+│    - Non-blocking Sockets (O_NONBLOCK) multiplexed via poll()          │
 │    - Per-connection state buffers (incoming / outgoing)                │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ Raw Socket Bytes
@@ -42,7 +42,7 @@ A single-threaded, high-performance, in-memory key-value database built in C++17
                                     │ Direct Memory Pointer
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 4. Zero-Copy Outbound Response Pipeline (server.cpp)                  │
+│ 4. Zero-Copy Outbound Response Pipeline (server.cpp)                   │
 │    - Direct buffer appending without intermediate heap string copies   │
 └────────────────────────────────────────────────────────────────────────┘
 
